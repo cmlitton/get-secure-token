@@ -1,0 +1,102 @@
+#!/bin/bash
+
+# This script is taken from parts of other scripts
+# Purpose is to have user select in Self Service and be presented with a window
+# to add their computer password. Once the script gets it, it runs commands to give the bfa admin
+# account a secure token via sysadminctl
+# Must be sent to a user who is already known to have a secure token
+
+# It is very simple and does not have error handling or checks to see if logged in users already has a secure token.
+# Maybe in the future.
+
+# ?add checks to make sure users has secure token
+# ?cleanup
+
+# variables
+
+loggedInUser=$(/usr/bin/python -c 'from SystemConfiguration import SCDynamicStoreCopyConsoleUser; import sys; username = (SCDynamicStoreCopyConsoleUser(None, None, None) or [None])[0]; username = [username,""][username in [u"loginwindow", None, u""]]; sys.stdout.write(username + "\n");')
+loggedInUserFull=$(id -F $loggedInUser)
+jamfBin="/usr/local/jamf/bin/jamf"
+
+localAdminAccount=bfaadmin
+localAdminPass=(decryptString "U2FsdGVkX1+ceeXP8ek5m/KbKfQU0WRWifUGjQJCRNo=" "9c79e5cff1e9399b" "c82027c2862529fec7e8219a")
+
+PROMPT_TITLE="Password Needed For FileVault"
+FORGOT_PW_MESSAGE="You made five incorrect password attempts.
+Please contact IT."
+
+# functions
+
+function hiddenInput() {
+osascript <<EOT
+tell app "System Events"
+with timeout of 86400 seconds
+text returned of (display dialog "$1" with hidden answer default answer "" buttons {"$3", "$4"} default button 2 with title "$2")
+end timeout
+end tell
+EOT
+}
+
+function hiddenInputNoCancel() {
+osascript <<EOT
+tell app "System Events"
+with timeout of 86400 seconds
+text returned of (display dialog "$1" with hidden answer default answer "" buttons {"$3"} default button 1 with title "$2")
+end timeout
+end tell
+EOT
+}
+
+function decryptString() {
+    # Usage: ~$ DecryptString "Encrypted String" "Salt" "Passphrase"
+    echo "${1}" | /usr/bin/openssl enc -aes256 -d -a -A -S "${2}" -k "${3}"
+}
+
+
+# get password for currently logged on user
+getPassword_loggedInUser () {
+    # Get the logged in user's password via a prompt.
+    echo "Prompting $loggedInUser for their Mac password..."
+    loggedInUserPass="$(hiddenInputNoCancel \
+        "Please enter the password for $loggedInUserFull, the one used to log in to this Mac:" \
+        "Password needed for Filevault" \
+        "OK")"
+    # Thanks to James Barclay (@futureimperfect) for this password validation loop.
+    TRY=1
+    until /usr/bin/dscl /Search -authonly "$loggedInUser" "$loggedInUserPass" &>/dev/null; do
+        (( TRY++ ))
+        echo "Prompting $loggedInUser for their Mac password (attempt $TRY)..."
+        loggedInUserPass="$(hiddenInput \
+            "Sorry, that password was incorrect. Please try again:" \
+            "$PROMPT_TITLE" \
+            "Cancel" \
+            "OK")"
+            if [[ "$loggedInUserPass" =~ "false" ]] || [[ -z "$loggedInUserPass" ]]; then
+                exit 0
+            fi
+        if (( TRY >= 5 )); then
+            echo "[ERROR] Password prompt unsuccessful after 5 attempts. Displaying \"forgot password\" message..."
+            OneButtonInfoBox \
+                "$FORGOT_PW_MESSAGE" \
+                "$PROMPT_TITLE" \
+                "OK" &
+            exit 1
+        fi
+    done
+    echo "Successfully prompted for $loggedInUser password."
+}
+
+    # add SecureToken to $loggedInUser account to allow FileVault access
+securetoken_add () {
+    sudo sysadminctl \
+        -adminUser "$loggedInUser" \
+        -adminPassword "$loggedInUserPass" \
+        -secureTokenOn "$localAdminAccount" \
+        -password "$localAdminPass"
+}
+
+# put it together
+    getPassword_loggedInUser
+    securetoken_add
+
+exit 0
